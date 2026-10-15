@@ -1,0 +1,109 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+      draft:
+        description: 'Create draft release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            output_name: Rpa.64.dll
+            archive_name: 7zip-rpa-plugin-x64
+            run_tests: true
+          - target: i686-pc-windows-msvc
+            output_name: Rpa.dll
+            archive_name: 7zip-rpa-plugin-x86
+            run_tests: false
+          - target: aarch64-pc-windows-msvc
+            output_name: Rpa.arm64.dll
+            archive_name: 7zip-rpa-plugin-arm64
+            run_tests: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Run test suite
+        if: matrix.run_tests
+        run: cargo test --verbose
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare release package
+        shell: pwsh
+        run: |
+          $bin = "target/${{ matrix.target }}/release/rpa.dll"
+          $out = "${{ matrix.output_name }}"
+          Copy-Item $bin $out -Force
+
+          # Create staging folder for zip package
+          $pkgDir = "${{ matrix.archive_name }}"
+          New-Item -ItemType Directory -Path $pkgDir -Force
+          Copy-Item $out $pkgDir/
+          Copy-Item install.cmd $pkgDir/
+          Copy-Item install.ps1 $pkgDir/
+          Copy-Item README.md $pkgDir/
+          Copy-Item LICENSE $pkgDir/
+
+          Compress-Archive -Path "$pkgDir/*" -DestinationPath "${{ matrix.archive_name }}.zip" -Force
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_name }}
+          path: |
+            ${{ matrix.output_name }}
+            ${{ matrix.archive_name }}.zip
+
+  publish:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release_files
+          find artifacts -type f \( -name "*.dll" -o -name "*.zip" \) -exec cp {} release_files/ \;
+          ls -la release_files/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: Release ${{ github.event.inputs.tag || github.ref_name }}
+          draft: ${{ github.event.inputs.draft || false }}
+          prerelease: false
+          generate_release_notes: true
+          files: release_files/*
