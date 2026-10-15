@@ -56,6 +56,7 @@ extern "system" {
     fn SysAllocStringLen(psz: *const u16, len: u32) -> *mut u16;
     fn SysAllocStringByteLen(psz: *const i8, len: u32) -> *mut u16;
     fn SysFreeString(bstr: *mut u16);
+    fn SysStringLen(bstr: *mut u16) -> u32;
     fn VariantClear(pvarg: *mut PROPVARIANT) -> HRESULT;
 }
 
@@ -70,6 +71,10 @@ unsafe fn SysAllocStringByteLen(_psz: *const i8, _len: u32) -> *mut u16 {
 #[cfg(not(windows))]
 unsafe fn SysFreeString(_bstr: *mut u16) {}
 #[cfg(not(windows))]
+unsafe fn SysStringLen(_bstr: *mut u16) -> u32 {
+    0
+}
+#[cfg(not(windows))]
 unsafe fn VariantClear(_pvarg: *mut PROPVARIANT) -> HRESULT {
     S_OK
 }
@@ -82,6 +87,17 @@ impl PROPVARIANT {
             wReserved2: 0,
             wReserved3: 0,
             data: PropVariantData { uhVal: 0 },
+        }
+    }
+
+    pub fn get_str(&self) -> Option<String> {
+        if self.vt == VT_BSTR && !unsafe { self.data.bstrVal }.is_null() {
+            let bstr = unsafe { self.data.bstrVal };
+            let len = unsafe { SysStringLen(bstr) } as usize;
+            let slice = unsafe { std::slice::from_raw_parts(bstr, len) };
+            Some(String::from_utf16_lossy(slice))
+        } else {
+            None
         }
     }
 

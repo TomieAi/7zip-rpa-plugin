@@ -12,6 +12,21 @@ use crate::com::propvariant::{
 };
 use crate::models::props::{arc_info_flags, handler_prop, PROPID};
 
+#[inline]
+pub fn dbg_log(_s: &str) {
+    #[cfg(debug_assertions)]
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("C:\\Users\\tomie\\AppData\\Local\\Temp\\rpa_debug.log")
+        {
+            let _ = writeln!(f, "[pid={}] {}", std::process::id(), _s);
+        }
+    }
+}
+
 /// Create an instance of the archive handler COM object.
 ///
 /// Called by 7-Zip when opening an archive.
@@ -21,6 +36,7 @@ pub unsafe extern "system" fn CreateObject(
     iid: *const GUID,
     out_object: *mut *mut c_void,
 ) -> HRESULT {
+    dbg_log(&format!("CreateObject called: clsid={:?}, iid={:?}", clsid.as_ref(), iid.as_ref()));
     if clsid.is_null() || iid.is_null() || out_object.is_null() {
         return E_INVALIDARG;
     }
@@ -29,8 +45,10 @@ pub unsafe extern "system" fn CreateObject(
     if *clsid == RPA_HANDLER_GUID && (*iid == IID_IINARCHIVE || *iid == IID_IUNKNOWN) {
         let instance = RpaInArchive::new();
         *out_object = instance as *mut c_void;
+        dbg_log("CreateObject -> S_OK");
         S_OK
     } else {
+        dbg_log("CreateObject -> CLASS_E_CLASSNOTAVAILABLE");
         CLASS_E_CLASSNOTAVAILABLE
     }
 }

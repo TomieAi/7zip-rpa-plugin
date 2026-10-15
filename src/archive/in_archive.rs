@@ -19,9 +19,12 @@ use crate::models::props::*;
 use crate::rpa::parser::RpaParser;
 use crate::rpa::reader::RpaReader;
 
+use std::sync::Arc;
+
 struct ArchiveState {
-    archive: RpaArchive,
+    archive: Arc<RpaArchive>,
     stream: *mut IInStream,
+    phy_size: u64,
 }
 
 #[repr(C)]
@@ -64,6 +67,7 @@ unsafe extern "system" fn rpa_query_interface(
     riid: *const GUID,
     ppvObject: *mut *mut c_void,
 ) -> HRESULT {
+    crate::dbg_log(&format!("rpa_query_interface: riid={:?}", riid.as_ref()));
     if ppvObject.is_null() {
         return E_INVALIDARG;
     }
@@ -76,8 +80,10 @@ unsafe extern "system" fn rpa_query_interface(
     if *riid == IID_IINARCHIVE || *riid == IID_IUNKNOWN {
         *ppvObject = this;
         rpa_add_ref(this);
+        crate::dbg_log("rpa_query_interface -> S_OK");
         S_OK
     } else {
+        crate::dbg_log(&format!("rpa_query_interface -> E_NOINTERFACE for {:?}", *riid));
         E_NOINTERFACE
     }
 }
@@ -109,9 +115,15 @@ unsafe extern "system" fn rpa_release(this: *mut c_void) -> u32 {
 unsafe extern "system" fn rpa_open(
     this: *mut c_void,
     stream: *mut IInStream,
-    _maxCheckStartPosition: *const u64,
+    maxCheckStartPosition: *const u64,
     openCallback: *mut IArchiveOpenCallback,
 ) -> HRESULT {
+    crate::dbg_log(&format!(
+        "rpa_open called: stream={:?}, maxCheckStart={:?}, callback={:?}",
+        stream,
+        maxCheckStartPosition.as_ref(),
+        openCallback
+    ));
     if stream.is_null() {
         return E_INVALIDARG;
     }
@@ -121,6 +133,11 @@ unsafe extern "system" fn rpa_open(
 
     match RpaParser::parse(&mut reader) {
         Ok(archive) => {
+            crate::dbg_log(&format!(
+                "RpaParser::parse OK: version={:?}, files={}",
+                archive.version,
+                archive.len()
+            ));
             // Retain stream reference
             ((*(*stream).vtable).AddRef)(stream as *mut c_void);
 
@@ -150,10 +167,22 @@ unsafe extern "system" fn rpa_open(
                 }
             }
 
-            *guard = Some(ArchiveState { archive, stream });
+            let mut stream_len = 0u64;
+            use std::io::{Seek, SeekFrom};
+            if let Ok(len) = reader.seek(SeekFrom::End(0)) {
+                stream_len = len;
+                let _ = reader.seek(SeekFrom::Start(0));
+            }
+
+            *guard = Some(ArchiveState {
+                archive: Arc::new(archive),
+                stream,
+                phy_size: stream_len,
+            });
             S_OK
         }
-        Err(_) => {
+        Err(e) => {
+            crate::dbg_log(&format!("RpaParser::parse FAILED: {:?}", e));
             // Not a recognized RPA archive
             S_FALSE
         }
@@ -181,21 +210,19 @@ unsafe extern "system" fn rpa_get_number_of_items(
     }
 
     let arc = &*(this as *mut RpaInArchive);
-    let guard = match arc.state.lock() {
-        Ok(g) => g,
-        Err(_) => return E_FAIL,
+    let count = {
+        let guard = match arc.state.lock() {
+            Ok(g) => g,
+            Err(_) => return E_FAIL,
+        };
+        match &*guard {
+            Some(state) => state.archive.len() as u32,
+            None => 0,
+        }
     };
 
-    match &*guard {
-        Some(state) => {
-            *numItems = state.archive.len() as u32;
-            S_OK
-        }
-        None => {
-            *numItems = 0;
-            S_OK
-        }
-    }
+    *numItems = count;
+    S_OK
 }
 
 unsafe extern "system" fn rpa_get_property(
@@ -204,23 +231,25 @@ unsafe extern "system" fn rpa_get_property(
     propID: PROPID,
     value: *mut PROPVARIANT,
 ) -> HRESULT {
+    crate::dbg_log(&format!("rpa_get_property: index={}, propID={}", index, propID));
     if value.is_null() {
         return E_INVALIDARG;
     }
 
     let val = &mut *value;
     let arc = &*(this as *mut RpaInArchive);
-    let guard = match arc.state.lock() {
-        Ok(g) => g,
-        Err(_) => return E_FAIL,
+    let archive = {
+        let guard = match arc.state.lock() {
+            Ok(g) => g,
+            Err(_) => return E_FAIL,
+        };
+        match &*guard {
+            Some(s) => s.archive.clone(),
+            None => return val.set_empty(),
+        }
     };
 
-    let state = match &*guard {
-        Some(s) => s,
-        None => return val.set_empty(),
-    };
-
-    let entry = match state.archive.get(index as usize) {
+    let entry = match archive.get(index as usize) {
         Some(e) => e,
         None => return val.set_empty(),
     };
@@ -231,10 +260,12 @@ unsafe extern "system" fn rpa_get_property(
         KPID_IS_DIR => val.set_bool(entry.is_dir),
         KPID_SIZE => val.set_u64(entry.length()),
         KPID_PACK_SIZE => val.set_u64(entry.length()),
-        KPID_POSITION => val.set_u64(entry.offset()),
+        KPID_ATTRIB => {
+            let attr = if entry.is_dir { 0x10u32 } else { 0x20u32 };
+            val.set_u32(attr)
+        }
         KPID_ENCRYPTED => val.set_bool(false),
         KPID_SOLID => val.set_bool(false),
-        KPID_READ_ONLY => val.set_bool(true),
         _ => val.set_empty(),
     }
 }
@@ -274,22 +305,35 @@ unsafe extern "system" fn rpa_extract(
     testMode: i32,
     extractCallback: *mut IArchiveExtractCallback,
 ) -> HRESULT {
+    crate::dbg_log(&format!(
+        "rpa_extract called: indices={:?}, numItems={}, testMode={}, callback={:?}",
+        indices, numItems, testMode, extractCallback
+    ));
     if extractCallback.is_null() {
+        crate::dbg_log("rpa_extract -> E_INVALIDARG (extractCallback is null)");
         return E_INVALIDARG;
     }
 
     let arc = &*(this as *mut RpaInArchive);
-    let guard = match arc.state.lock() {
-        Ok(g) => g,
-        Err(_) => return E_FAIL,
-    };
+    let (archive, stream) = {
+        let guard = match arc.state.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                crate::dbg_log("rpa_extract -> E_FAIL (mutex lock failed)");
+                return E_FAIL;
+            }
+        };
 
-    let state = match &*guard {
-        Some(s) => s,
-        None => return E_FAIL,
-    };
+        match &*guard {
+            Some(s) => (s.archive.clone(), s.stream),
+            None => {
+                crate::dbg_log("rpa_extract -> E_FAIL (state is None)");
+                return E_FAIL;
+            }
+        }
+    }; // Lock is dropped immediately!
 
-    let total_archive_items = state.archive.len();
+    let total_archive_items = archive.len();
     let is_all_items = indices.is_null() || numItems == u32::MAX;
     let count = if is_all_items {
         total_archive_items as u32
@@ -297,7 +341,34 @@ unsafe extern "system" fn rpa_extract(
         numItems
     };
 
-    let mut stream_reader = StreamReader::new(state.stream);
+    if count == 0 {
+        return S_OK;
+    }
+
+    // 1. Calculate total uncompressed size across requested items
+    let mut total_unpack_size = 0u64;
+    for i in 0..count {
+        let item_index = if is_all_items {
+            i
+        } else {
+            *indices.add(i as usize)
+        };
+        if let Some(entry) = archive.get(item_index as usize) {
+            total_unpack_size += entry.length();
+        }
+    }
+
+    // 2. Report total size to 7-Zip progress bar
+    let hr = ((*(*extractCallback).vtable).SetTotal)(
+        extractCallback as *mut c_void,
+        total_unpack_size,
+    );
+    if hr != S_OK {
+        return hr;
+    }
+
+    let mut completed_bytes = 0u64;
+    let mut stream_reader = StreamReader::new(stream);
 
     for i in 0..count {
         let item_index = if is_all_items {
@@ -310,7 +381,7 @@ unsafe extern "system" fn rpa_extract(
             continue;
         }
 
-        let entry = match state.archive.get(item_index as usize) {
+        let entry = match archive.get(item_index as usize) {
             Some(e) => e,
             None => continue,
         };
@@ -321,20 +392,12 @@ unsafe extern "system" fn rpa_extract(
             ask_mode::K_EXTRACT
         };
 
-        ((*(*extractCallback).vtable).PrepareOperation)(
-            extractCallback as *mut c_void,
-            ask_extract_mode,
-        );
+        crate::dbg_log(&format!(
+            "Item {}/{}: index={}, path='{}', len={}, ask_mode={}",
+            i + 1, count, item_index, entry.path, entry.length(), ask_extract_mode
+        ));
 
-        if testMode != 0 {
-            // Test mode: we can optionally verify reading the stream
-            ((*(*extractCallback).vtable).SetOperationResult)(
-                extractCallback as *mut c_void,
-                operation_result::K_OK,
-            );
-            continue;
-        }
-
+        // 3. In 7-Zip's COM protocol, GetStream is called FIRST
         let mut out_stream: *mut ISequentialOutStream = std::ptr::null_mut();
         let hr = ((*(*extractCallback).vtable).GetStream)(
             extractCallback as *mut c_void,
@@ -343,32 +406,96 @@ unsafe extern "system" fn rpa_extract(
             ask_extract_mode,
         );
 
+        crate::dbg_log(&format!("  GetStream returned 0x{:08X}, out_stream={:?}", hr, out_stream));
         if hr != S_OK {
+            return hr;
+        }
+
+        if entry.is_dir {
+            crate::dbg_log("  Entry is dir, skipping stream write");
+            ((*(*extractCallback).vtable).PrepareOperation)(
+                extractCallback as *mut c_void,
+                ask_extract_mode,
+            );
+            ((*(*extractCallback).vtable).SetOperationResult)(
+                extractCallback as *mut c_void,
+                operation_result::K_OK,
+            );
             continue;
         }
 
-        if out_stream.is_null() {
-            // User skipped file
+        if testMode == 0 && out_stream.is_null() {
+            crate::dbg_log("  out_stream is null in extract mode (file skipped)");
+            // User skipped file (e.g. skip overwrite)
             continue;
         }
 
-        let mut writer = OutStreamWriter(out_stream);
-        let stream_result = RpaReader::stream_entry(&mut stream_reader, entry, &mut writer);
+        // 4. PrepareOperation is called SECOND
+        let hr = ((*(*extractCallback).vtable).PrepareOperation)(
+            extractCallback as *mut c_void,
+            ask_extract_mode,
+        );
+        crate::dbg_log(&format!("  PrepareOperation returned 0x{:08X}", hr));
+        if hr != S_OK {
+            if !out_stream.is_null() {
+                ((*(*out_stream).vtable).Release)(out_stream as *mut c_void);
+            }
+            return hr;
+        }
 
-        // Always release the out_stream COM reference
-        ((*(*out_stream).vtable).Release)(out_stream as *mut c_void);
+        // 5. Perform extraction or testing
+        let op_result = if testMode != 0 {
+            let mut sink = std::io::sink();
+            match RpaReader::stream_entry(&mut stream_reader, entry, &mut sink) {
+                Ok(_) => operation_result::K_OK,
+                Err(e) => {
+                    crate::dbg_log(&format!("  Test mode stream_entry error: {:?}", e));
+                    operation_result::K_DATA_ERROR
+                }
+            }
+        } else {
+            let mut writer = OutStreamWriter(out_stream);
+            let res = RpaReader::stream_entry(&mut stream_reader, entry, &mut writer);
 
-        let op_result = match stream_result {
-            Ok(_) => operation_result::K_OK,
-            Err(_) => operation_result::K_DATA_ERROR,
+            // CRITICAL: Release out_stream BEFORE SetOperationResult.
+            // In 7-Zip, SetOperationResult finalizes file timestamps/attributes and closes handles.
+            ((*(*out_stream).vtable).Release)(out_stream as *mut c_void);
+
+            match res {
+                Ok(written) => {
+                    crate::dbg_log(&format!("  stream_entry wrote {} bytes OK", written));
+                    operation_result::K_OK
+                }
+                Err(e) => {
+                    crate::dbg_log(&format!("  stream_entry FAILED: {:?}", e));
+                    operation_result::K_DATA_ERROR
+                }
+            }
         };
 
-        ((*(*extractCallback).vtable).SetOperationResult)(
+        // 6. Update progress bar
+        completed_bytes += entry.length();
+        let hr_progress = ((*(*extractCallback).vtable).SetCompleted)(
+            extractCallback as *mut c_void,
+            &completed_bytes,
+        );
+        if hr_progress != S_OK {
+            crate::dbg_log(&format!("  SetCompleted returned error 0x{:08X}", hr_progress));
+            return hr_progress;
+        }
+
+        // 7. SetOperationResult is called LAST for each item
+        let hr_res = ((*(*extractCallback).vtable).SetOperationResult)(
             extractCallback as *mut c_void,
             op_result,
         );
+        crate::dbg_log(&format!("  SetOperationResult({}) returned 0x{:08X}", op_result, hr_res));
+        if hr_res != S_OK {
+            return hr_res;
+        }
     }
 
+    crate::dbg_log("rpa_extract completed successfully with S_OK");
     S_OK
 }
 
@@ -377,27 +504,41 @@ unsafe extern "system" fn rpa_get_archive_property(
     propID: PROPID,
     value: *mut PROPVARIANT,
 ) -> HRESULT {
+    crate::dbg_log(&format!("rpa_get_archive_property: propID={}", propID));
     if value.is_null() {
         return E_INVALIDARG;
     }
 
     let val = &mut *value;
     let arc = &*(this as *mut RpaInArchive);
-    let guard = match arc.state.lock() {
-        Ok(g) => g,
-        Err(_) => return E_FAIL,
+    let (read_only, headers_size, phy_size) = {
+        let guard = match arc.state.lock() {
+            Ok(g) => g,
+            Err(_) => return E_FAIL,
+        };
+        match &*guard {
+            Some(state) => (true, Some(state.archive.index_offset), Some(state.phy_size)),
+            None => (true, None, None),
+        }
     };
 
     match propID {
-        KPID_READ_ONLY => val.set_bool(true),
-        KPID_OFFSET => val.set_u64(0),
-        KPID_HEADERS_SIZE => {
-            if let Some(state) = &*guard {
-                val.set_u64(state.archive.index_offset)
+        KPID_READ_ONLY => val.set_bool(read_only),
+        KPID_PHY_SIZE => {
+            if let Some(sz) = phy_size {
+                val.set_u64(sz)
             } else {
                 val.set_empty()
             }
         }
+        KPID_HEADERS_SIZE => {
+            if let Some(offset) = headers_size {
+                val.set_u64(offset)
+            } else {
+                val.set_empty()
+            }
+        }
+        KPID_OFFSET => val.set_empty(),
         _ => val.set_empty(),
     }
 }
