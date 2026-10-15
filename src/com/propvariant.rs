@@ -39,6 +39,7 @@ pub union PropVariantData {
     pub bstrVal: *mut u16,
     pub filetime: FILETIME,
     pub ptr: *mut c_void,
+    pub _pad: [u8; 16],
 }
 
 #[repr(C)]
@@ -110,10 +111,10 @@ impl PROPVARIANT {
     }
 
     pub fn get_u64(&self) -> Option<u64> {
-        if self.vt == VT_UI8 {
-            Some(unsafe { self.data.uhVal })
-        } else {
-            None
+        match self.vt {
+            VT_UI4 => Some(unsafe { self.data.uintVal as u64 }),
+            VT_UI8 => Some(unsafe { self.data.uhVal }),
+            _ => None,
         }
     }
 

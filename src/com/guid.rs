@@ -60,12 +60,29 @@ pub const IID_IARCHIVEEXTRACTCALLBACK: GUID = make_7zip_guid(6, 0x20);
 pub const IID_IINARCHIVE: GUID = make_7zip_guid(6, 0x60);
 pub const IID_IARCHIVEUPDATECALLBACK: GUID = make_7zip_guid(6, 0x80);
 pub const IID_IOUTARCHIVE: GUID = make_7zip_guid(6, 0xA0);
+pub const IID_ISETPROPERTIES: GUID = make_7zip_guid(6, 0x03);
 
-// Unique GUID for Ren'Py RPA format handler:
+// Unique GUIDs for Ren'Py RPA format handlers:
 // {9f1a7b42-5c8e-47e1-bf2a-3d8e4f12996a}
 pub const RPA_HANDLER_GUID: GUID = GUID {
     data1: 0x9f1a7b42,
     data2: 0x5c8e,
     data3: 0x47e1,
     data4: [0xbf, 0x2a, 0x3d, 0x8e, 0x4f, 0x12, 0x99, 0x6a],
+};
+
+// {9f1a7b42-5c8e-47e1-bf2a-3d8e4f12996b}
+pub const RPA2_HANDLER_GUID: GUID = GUID {
+    data1: 0x9f1a7b42,
+    data2: 0x5c8e,
+    data3: 0x47e1,
+    data4: [0xbf, 0x2a, 0x3d, 0x8e, 0x4f, 0x12, 0x99, 0x6b],
+};
+
+// {9f1a7b42-5c8e-47e1-bf2a-3d8e4f12996c}
+pub const RPA3_2_HANDLER_GUID: GUID = GUID {
+    data1: 0x9f1a7b42,
+    data2: 0x5c8e,
+    data3: 0x47e1,
+    data4: [0xbf, 0x2a, 0x3d, 0x8e, 0x4f, 0x12, 0x99, 0x6c],
 };

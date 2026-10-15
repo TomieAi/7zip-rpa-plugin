@@ -3,12 +3,12 @@
 use std::ffi::c_void;
 
 use rpa::com::guid::{
-    IID_IINARCHIVE, IID_IOUTARCHIVE, IID_IOUTSTREAM, IID_ISEQUENTIALOUTSTREAM, IID_IUNKNOWN,
-    RPA_HANDLER_GUID,
+    IID_IINARCHIVE, IID_IOUTARCHIVE, IID_IOUTSTREAM, IID_ISEQUENTIALOUTSTREAM, IID_ISETPROPERTIES,
+    IID_IUNKNOWN, RPA_HANDLER_GUID,
 };
 use rpa::com::interfaces::{
     IArchiveUpdateCallback, IArchiveUpdateCallbackVTable, IInArchive, IOutArchive,
-    IOutStreamVTable, ISequentialInStream, ISequentialInStreamVTable,
+    IOutStreamVTable, ISequentialInStream, ISequentialInStreamVTable, ISetProperties,
 };
 use rpa::com::propvariant::{PROPVARIANT, S_OK, VT_BOOL, VT_BSTR, VT_UI4};
 use rpa::models::props::handler_prop;
@@ -19,7 +19,7 @@ fn test_get_number_of_formats() {
     let mut num_formats: u32 = 0;
     let hr = unsafe { GetNumberOfFormats(&mut num_formats) };
     assert_eq!(hr, S_OK);
-    assert_eq!(num_formats, 1);
+    assert_eq!(num_formats, 3);
 }
 
 #[test]
@@ -922,3 +922,157 @@ fn test_com_update_items_create_and_reopen() {
         ((*(*in_arc).vtable).Release)(in_arc as *mut c_void);
     }
 }
+
+#[test]
+fn test_com_set_properties_rpa2() {
+    let mut obj: *mut c_void = std::ptr::null_mut();
+    let hr = unsafe { CreateObject(&RPA_HANDLER_GUID, &IID_IOUTARCHIVE, &mut obj) };
+    assert_eq!(hr, S_OK);
+    let out_archive = obj as *mut IOutArchive;
+
+    // Query ISetProperties
+    let mut set_props_ptr: *mut c_void = std::ptr::null_mut();
+    let hr_qi = unsafe {
+        ((*(*out_archive).vtable).QueryInterface)(
+            out_archive as *mut c_void,
+            &IID_ISETPROPERTIES,
+            &mut set_props_ptr,
+        )
+    };
+    assert_eq!(hr_qi, S_OK);
+    assert!(!set_props_ptr.is_null());
+    let set_props = set_props_ptr as *mut ISetProperties;
+
+    // Set v=2
+    let name_v: Vec<u16> = "v\0".encode_utf16().collect();
+    let names = [name_v.as_ptr()];
+    let mut val = PROPVARIANT::new();
+    val.set_u64(2);
+    let values = [val];
+
+    let hr_set = unsafe {
+        ((*(*set_props).vtable).SetProperties)(
+            set_props as *mut c_void,
+            names.as_ptr(),
+            values.as_ptr(),
+            1,
+        )
+    };
+    assert_eq!(hr_set, S_OK);
+
+    // Now call UpdateItems to write an archive
+    let mock_out = MockSeekableOutStream {
+        seq_vtable: &MOCK_SEEK_OUT_SEQ_VTABLE,
+        seek_vtable: &MOCK_SEEK_OUT_SEEK_VTABLE,
+        cursor: Mutex::new(std::io::Cursor::new(Vec::new())),
+    };
+
+    let items_def = vec![MockUpdateItemDef {
+        path: "script.rpy".into(),
+        data: b"label start:\n    return\n".to_vec(),
+    }];
+
+    let update_cb = MockUpdateCallback {
+        vtable: &MOCK_UPDATE_CALLBACK_VTABLE,
+        items: items_def,
+        results: Mutex::new(Vec::new()),
+    };
+
+    let hr_update = unsafe {
+        ((*(*out_archive).vtable).UpdateItems)(
+            out_archive as *mut c_void,
+            &mock_out as *const _ as *mut ISequentialOutStream,
+            1,
+            &update_cb as *const _ as *mut IArchiveUpdateCallback,
+        )
+    };
+    assert_eq!(hr_update, S_OK);
+
+    unsafe {
+        ((*(*set_props).vtable).Release)(set_props as *mut c_void);
+        ((*(*out_archive).vtable).Release)(out_archive as *mut c_void);
+    }
+
+    let written = mock_out.cursor.into_inner().unwrap().into_inner();
+    let header_str = String::from_utf8_lossy(&written[..25]);
+    assert!(header_str.starts_with("RPA-2.0 "), "Expected RPA-2.0 header, got: {}", header_str);
+}
+
+#[test]
+fn test_com_set_properties_custom_key() {
+    let mut obj: *mut c_void = std::ptr::null_mut();
+    let hr = unsafe { CreateObject(&RPA_HANDLER_GUID, &IID_IOUTARCHIVE, &mut obj) };
+    assert_eq!(hr, S_OK);
+    let out_archive = obj as *mut IOutArchive;
+
+    // Query ISetProperties
+    let mut set_props_ptr: *mut c_void = std::ptr::null_mut();
+    let hr_qi = unsafe {
+        ((*(*out_archive).vtable).QueryInterface)(
+            out_archive as *mut c_void,
+            &IID_ISETPROPERTIES,
+            &mut set_props_ptr,
+        )
+    };
+    assert_eq!(hr_qi, S_OK);
+    let set_props = set_props_ptr as *mut ISetProperties;
+
+    // Set v=3.0, key=0xdeadbeef
+    let name_v: Vec<u16> = "version\0".encode_utf16().collect();
+    let name_k: Vec<u16> = "key\0".encode_utf16().collect();
+    let names = [name_v.as_ptr(), name_k.as_ptr()];
+
+    let mut val_v = PROPVARIANT::new();
+    val_v.set_str("3.0");
+    let mut val_k = PROPVARIANT::new();
+    val_k.set_str("0xdeadbeef");
+    let values = [val_v, val_k];
+
+    let hr_set = unsafe {
+        ((*(*set_props).vtable).SetProperties)(
+            set_props as *mut c_void,
+            names.as_ptr(),
+            values.as_ptr(),
+            2,
+        )
+    };
+    assert_eq!(hr_set, S_OK);
+
+    let mock_out = MockSeekableOutStream {
+        seq_vtable: &MOCK_SEEK_OUT_SEQ_VTABLE,
+        seek_vtable: &MOCK_SEEK_OUT_SEEK_VTABLE,
+        cursor: Mutex::new(std::io::Cursor::new(Vec::new())),
+    };
+
+    let items_def = vec![MockUpdateItemDef {
+        path: "script.rpy".into(),
+        data: b"label start:\n    return\n".to_vec(),
+    }];
+
+    let update_cb = MockUpdateCallback {
+        vtable: &MOCK_UPDATE_CALLBACK_VTABLE,
+        items: items_def,
+        results: Mutex::new(Vec::new()),
+    };
+
+    let hr_update = unsafe {
+        ((*(*out_archive).vtable).UpdateItems)(
+            out_archive as *mut c_void,
+            &mock_out as *const _ as *mut ISequentialOutStream,
+            1,
+            &update_cb as *const _ as *mut IArchiveUpdateCallback,
+        )
+    };
+    assert_eq!(hr_update, S_OK);
+
+    unsafe {
+        ((*(*set_props).vtable).Release)(set_props as *mut c_void);
+        ((*(*out_archive).vtable).Release)(out_archive as *mut c_void);
+    }
+
+    let written = mock_out.cursor.into_inner().unwrap().into_inner();
+    let header_str = String::from_utf8_lossy(&written[..34]);
+    assert!(header_str.starts_with("RPA-3.0 "), "Expected RPA-3.0 header, got: {}", header_str);
+    assert!(header_str.contains("deadbeef"), "Expected deadbeef key in header: {}", header_str);
+}
+

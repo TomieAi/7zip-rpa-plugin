@@ -335,3 +335,31 @@ pub struct IOutArchiveVTable {
 pub struct IOutArchive {
     pub vtable: *const IOutArchiveVTable,
 }
+
+// =========================================================================
+// ISetProperties
+// =========================================================================
+#[repr(C)]
+pub struct ISetPropertiesVTable {
+    // IUnknown
+    pub QueryInterface: unsafe extern "system" fn(
+        this: *mut c_void,
+        riid: *const GUID,
+        ppvObject: *mut *mut c_void,
+    ) -> HRESULT,
+    pub AddRef: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    pub Release: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    // ISetProperties
+    pub SetProperties: unsafe extern "system" fn(
+        this: *mut c_void,
+        names: *const *const u16,
+        values: *const PROPVARIANT,
+        numProps: u32,
+    ) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct ISetProperties {
+    pub vtable: *const ISetPropertiesVTable,
+}
+

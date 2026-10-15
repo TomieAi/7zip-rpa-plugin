@@ -63,6 +63,9 @@ impl RpaWriter {
         // 1. Write placeholder header
         let placeholder = match version {
             RpaVersion::Rpa2 => b"RPA-2.0 0000000000000000\n".to_vec(),
+            RpaVersion::Rpa3_2 => {
+                format!("RPA-3.2 0000000000000000 00000000 {:08x}\n", key).into_bytes()
+            }
             _ => format!("RPA-3.0 0000000000000000 {:08x}\n", key).into_bytes(),
         };
         let header_len = placeholder.len();
@@ -131,6 +134,9 @@ impl RpaWriter {
         writer.seek(SeekFrom::Start(0))?;
         let final_header = match version {
             RpaVersion::Rpa2 => format!("RPA-2.0 {:016x}\n", index_offset).into_bytes(),
+            RpaVersion::Rpa3_2 => {
+                format!("RPA-3.2 {:016x} 00000000 {:08x}\n", index_offset, key).into_bytes()
+            }
             _ => format!("RPA-3.0 {:016x} {:08x}\n", index_offset, key).into_bytes(),
         };
 

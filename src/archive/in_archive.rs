@@ -5,13 +5,17 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::com::guid::{GUID, IID_IINARCHIVE, IID_IOUTARCHIVE, IID_IOUTSTREAM, IID_IUNKNOWN};
+use crate::com::guid::{
+    GUID, IID_IINARCHIVE, IID_IOUTARCHIVE, IID_IOUTSTREAM, IID_ISETPROPERTIES, IID_IUNKNOWN,
+};
 use crate::com::interfaces::{
     IArchiveExtractCallback, IArchiveOpenCallback, IArchiveUpdateCallback, IInArchiveVTable,
     IInStream, IOutArchiveVTable, IOutStream, ISequentialInStream, ISequentialOutStream,
+    ISetPropertiesVTable,
 };
 use crate::com::propvariant::{
-    E_FAIL, E_INVALIDARG, E_NOINTERFACE, HRESULT, PROPVARIANT, S_FALSE, S_OK, VARTYPE,
+    E_FAIL, E_INVALIDARG, E_NOINTERFACE, HRESULT, PROPVARIANT, S_FALSE, S_OK, VARTYPE, VT_BSTR,
+    VT_UI4, VT_UI8,
 };
 use crate::com::stream::{SequentialInStreamReader, StreamReader, StreamWriter};
 use crate::models::archive::RpaArchive;
@@ -32,8 +36,11 @@ struct ArchiveState {
 pub struct RpaHandler {
     pub in_archive_vtable: *const IInArchiveVTable,
     pub out_archive_vtable: *const IOutArchiveVTable,
+    pub set_properties_vtable: *const ISetPropertiesVTable,
     ref_count: AtomicU32,
     state: Mutex<Option<ArchiveState>>,
+    target_version: Mutex<Option<RpaVersion>>,
+    target_key: Mutex<Option<u32>>,
 }
 
 pub type RpaInArchive = RpaHandler;
@@ -64,13 +71,24 @@ static RPA_OUT_ARCHIVE_VTABLE: IOutArchiveVTable = IOutArchiveVTable {
     GetFileTimeType: rpa_get_file_time_type,
 };
 
+// Global static VTable for ISetProperties
+static RPA_SET_PROPERTIES_VTABLE: ISetPropertiesVTable = ISetPropertiesVTable {
+    QueryInterface: rpa_set_props_query_interface,
+    AddRef: rpa_set_props_add_ref,
+    Release: rpa_set_props_release,
+    SetProperties: rpa_set_properties,
+};
+
 impl RpaHandler {
-    pub fn new() -> *mut Self {
+    pub fn new(default_version: Option<RpaVersion>) -> *mut Self {
         let instance = Box::new(Self {
             in_archive_vtable: &RPA_IN_ARCHIVE_VTABLE,
             out_archive_vtable: &RPA_OUT_ARCHIVE_VTABLE,
+            set_properties_vtable: &RPA_SET_PROPERTIES_VTABLE,
             ref_count: AtomicU32::new(1),
             state: Mutex::new(None),
+            target_version: Mutex::new(default_version),
+            target_key: Mutex::new(None),
         });
         Box::into_raw(instance)
     }
@@ -100,6 +118,11 @@ unsafe extern "system" fn rpa_query_interface(
         *ppvObject = (this as *mut u8).add(std::mem::size_of::<usize>()) as *mut c_void;
         rpa_add_ref(this);
         crate::dbg_log("rpa_query_interface -> S_OK (IOutArchive)");
+        S_OK
+    } else if *riid == IID_ISETPROPERTIES {
+        *ppvObject = (this as *mut u8).add(2 * std::mem::size_of::<usize>()) as *mut c_void;
+        rpa_add_ref(this);
+        crate::dbg_log("rpa_query_interface -> S_OK (ISetProperties)");
         S_OK
     } else {
         crate::dbg_log(&format!("rpa_query_interface -> E_NOINTERFACE for {:?}", *riid));
@@ -155,6 +178,33 @@ unsafe extern "system" fn rpa_out_add_ref(this: *mut c_void) -> u32 {
 
 unsafe extern "system" fn rpa_out_release(this: *mut c_void) -> u32 {
     let handler = get_handler_from_out(this);
+    rpa_release(handler as *mut c_void)
+}
+
+// -------------------------------------------------------------------------
+// ISetProperties interface forwarding
+// -------------------------------------------------------------------------
+#[inline]
+unsafe fn get_handler_from_set_props(this: *mut c_void) -> *mut RpaHandler {
+    (this as *mut u8).sub(2 * std::mem::size_of::<usize>()) as *mut RpaHandler
+}
+
+unsafe extern "system" fn rpa_set_props_query_interface(
+    this: *mut c_void,
+    riid: *const GUID,
+    ppvObject: *mut *mut c_void,
+) -> HRESULT {
+    let handler = get_handler_from_set_props(this);
+    rpa_query_interface(handler as *mut c_void, riid, ppvObject)
+}
+
+unsafe extern "system" fn rpa_set_props_add_ref(this: *mut c_void) -> u32 {
+    let handler = get_handler_from_set_props(this);
+    rpa_add_ref(handler as *mut c_void)
+}
+
+unsafe extern "system" fn rpa_set_props_release(this: *mut c_void) -> u32 {
+    let handler = get_handler_from_set_props(this);
     rpa_release(handler as *mut c_void)
 }
 
@@ -725,7 +775,7 @@ unsafe extern "system" fn rpa_update_items(
     let handler = get_handler_from_out(this);
 
     // 1. Inspect existing state if open
-    let (existing_archive, existing_stream, target_version, target_key) = {
+    let (existing_archive, existing_stream, mut target_version, mut target_key) = {
         let guard = match (*handler).state.lock() {
             Ok(g) => g,
             Err(_) => return E_FAIL,
@@ -738,9 +788,23 @@ unsafe extern "system" fn rpa_update_items(
                 state.archive.key,
             )
         } else {
-            (None, None, RpaVersion::Rpa3, 0u32)
+            (None, None, RpaVersion::Rpa3, 0x42424242u32)
         }
     };
+
+    if let Ok(v_guard) = (*handler).target_version.lock() {
+        if let Some(v) = *v_guard {
+            target_version = v;
+        }
+    }
+    if let Ok(k_guard) = (*handler).target_key.lock() {
+        if let Some(k) = *k_guard {
+            target_key = k;
+        }
+    }
+    if target_version == RpaVersion::Rpa2 {
+        target_key = 0;
+    }
 
     // 2. Query IOutStream on outStream to check if seeking is supported
     let mut out_seek: *mut IOutStream = std::ptr::null_mut();
@@ -957,4 +1021,130 @@ unsafe extern "system" fn rpa_update_items(
             E_FAIL
         }
     }
+}
+
+fn parse_version_str(s: &str) -> Option<RpaVersion> {
+    let lower = s.to_ascii_lowercase();
+    let trimmed = lower.trim();
+    let s = trimmed
+        .trim_start_matches("rpa-")
+        .trim_start_matches("rpa")
+        .trim_start_matches('v');
+    match s {
+        "2" | "2.0" => Some(RpaVersion::Rpa2),
+        "3" | "3.0" => Some(RpaVersion::Rpa3),
+        "3.2" => Some(RpaVersion::Rpa3_2),
+        _ => None,
+    }
+}
+
+fn parse_key_str(s: &str) -> Option<u32> {
+    let trimmed = s.trim();
+    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else if let Ok(dec) = trimmed.parse::<u32>() {
+        Some(dec)
+    } else {
+        u32::from_str_radix(trimmed, 16).ok()
+    }
+}
+
+// -------------------------------------------------------------------------
+// ISetProperties implementation
+// -------------------------------------------------------------------------
+unsafe extern "system" fn rpa_set_properties(
+    this: *mut c_void,
+    names: *const *const u16,
+    values: *const PROPVARIANT,
+    numProps: u32,
+) -> HRESULT {
+    crate::dbg_log(&format!("rpa_set_properties: numProps={}", numProps));
+    if numProps == 0 {
+        return S_OK;
+    }
+    if names.is_null() || values.is_null() {
+        return E_INVALIDARG;
+    }
+
+    let handler = get_handler_from_set_props(this);
+
+    for i in 0..numProps {
+        let name_ptr = *names.add(i as usize);
+        if name_ptr.is_null() {
+            continue;
+        }
+
+        let mut len = 0;
+        while *name_ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(name_ptr, len);
+        let name_str = String::from_utf16_lossy(slice).trim().to_ascii_lowercase();
+        let prop = &*values.add(i as usize);
+
+        crate::dbg_log(&format!(
+            "rpa_set_properties [{}]: name='{}', vt={}",
+            i, name_str, prop.vt
+        ));
+
+        // Check if name itself specifies the version directly (e.g. "v2", "v3", "v3.2", "rpa2", "rpa3")
+        if let Some(version) = parse_version_str(&name_str) {
+            if let Ok(mut guard) = (*handler).target_version.lock() {
+                *guard = Some(version);
+            }
+            continue;
+        }
+
+        if name_str == "v"
+            || name_str == "ver"
+            || name_str == "version"
+            || name_str == "m"
+            || name_str == "method"
+        {
+            let version = match prop.vt {
+                VT_UI4 | VT_UI8 => match prop.get_u64() {
+                    Some(2) => Some(RpaVersion::Rpa2),
+                    Some(3) => Some(RpaVersion::Rpa3),
+                    _ => None,
+                },
+                VT_BSTR => {
+                    if let Some(s) = prop.get_str() {
+                        parse_version_str(&s)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(v) = version {
+                crate::dbg_log(&format!("rpa_set_properties: setting target_version to {:?}", v));
+                if let Ok(mut guard) = (*handler).target_version.lock() {
+                    *guard = Some(v);
+                }
+            }
+        } else if name_str == "key" || name_str == "k" {
+            let key_val = match prop.vt {
+                VT_UI4 | VT_UI8 => prop.get_u64().map(|v| v as u32),
+                VT_BSTR => {
+                    if let Some(s) = prop.get_str() {
+                        parse_key_str(&s)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(k) = key_val {
+                crate::dbg_log(&format!("rpa_set_properties: setting target_key to 0x{:08x}", k));
+                if let Ok(mut guard) = (*handler).target_key.lock() {
+                    *guard = Some(k);
+                }
+            }
+        }
+        // Standard 7-Zip options like 'x' (compression level), 'mt', 'memuse', 's', 'cp' are accepted silently.
+    }
+
+    S_OK
 }
