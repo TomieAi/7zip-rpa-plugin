@@ -13,9 +13,9 @@ flate2 = "1.0"
 num-traits = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde-pickle = "1.2"
+tempfile = "3.10"
 
 [dev-dependencies]
-tempfile = "3.10"
 
 [[test]]
 name = "test_rpa"

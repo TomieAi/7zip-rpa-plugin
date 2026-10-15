@@ -1,25 +1,27 @@
 #![allow(non_snake_case, non_camel_case_types)]
 
 use std::ffi::c_void;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use crate::com::guid::{GUID, IID_IINARCHIVE, IID_IUNKNOWN};
+use crate::com::guid::{GUID, IID_IINARCHIVE, IID_IOUTARCHIVE, IID_IOUTSTREAM, IID_IUNKNOWN};
 use crate::com::interfaces::{
-    IArchiveExtractCallback, IArchiveOpenCallback, IInArchiveVTable, IInStream,
-    ISequentialOutStream,
+    IArchiveExtractCallback, IArchiveOpenCallback, IArchiveUpdateCallback, IInArchiveVTable,
+    IInStream, IOutArchiveVTable, IOutStream, ISequentialInStream, ISequentialOutStream,
 };
 use crate::com::propvariant::{
-    E_FAIL, E_INVALIDARG, E_NOINTERFACE, HRESULT, PROPVARIANT, S_FALSE, S_OK, VARTYPE,
+    E_FAIL, E_INVALIDARG, E_NOINTERFACE, HRESULT, PROPVARIANT, S_FALSE, S_OK, VARTYPE, VT_BOOL,
+    VT_BSTR, VT_UI8,
 };
-use crate::com::stream::StreamReader;
+use crate::com::stream::{SequentialInStreamReader, StreamReader, StreamWriter};
 use crate::models::archive::RpaArchive;
+use crate::models::error::RpaError;
 use crate::models::props::*;
+use crate::models::version::RpaVersion;
 use crate::rpa::parser::RpaParser;
 use crate::rpa::reader::RpaReader;
-
-use std::sync::Arc;
+use crate::rpa::writer::{normalize_rpa_path, RpaItemSource, RpaWriter};
 
 struct ArchiveState {
     archive: Arc<RpaArchive>,
@@ -28,13 +30,16 @@ struct ArchiveState {
 }
 
 #[repr(C)]
-pub struct RpaInArchive {
-    pub vtable: *const IInArchiveVTable,
+pub struct RpaHandler {
+    pub in_archive_vtable: *const IInArchiveVTable,
+    pub out_archive_vtable: *const IOutArchiveVTable,
     ref_count: AtomicU32,
     state: Mutex<Option<ArchiveState>>,
 }
 
-// Global static VTable for RpaInArchive
+pub type RpaInArchive = RpaHandler;
+
+// Global static VTable for IInArchive
 static RPA_IN_ARCHIVE_VTABLE: IInArchiveVTable = IInArchiveVTable {
     QueryInterface: rpa_query_interface,
     AddRef: rpa_add_ref,
@@ -51,10 +56,20 @@ static RPA_IN_ARCHIVE_VTABLE: IInArchiveVTable = IInArchiveVTable {
     GetArchivePropertyInfo: rpa_get_archive_property_info,
 };
 
-impl RpaInArchive {
+// Global static VTable for IOutArchive
+static RPA_OUT_ARCHIVE_VTABLE: IOutArchiveVTable = IOutArchiveVTable {
+    QueryInterface: rpa_out_query_interface,
+    AddRef: rpa_out_add_ref,
+    Release: rpa_out_release,
+    UpdateItems: rpa_update_items,
+    GetFileTimeType: rpa_get_file_time_type,
+};
+
+impl RpaHandler {
     pub fn new() -> *mut Self {
         let instance = Box::new(Self {
-            vtable: &RPA_IN_ARCHIVE_VTABLE,
+            in_archive_vtable: &RPA_IN_ARCHIVE_VTABLE,
+            out_archive_vtable: &RPA_OUT_ARCHIVE_VTABLE,
             ref_count: AtomicU32::new(1),
             state: Mutex::new(None),
         });
@@ -80,7 +95,12 @@ unsafe extern "system" fn rpa_query_interface(
     if *riid == IID_IINARCHIVE || *riid == IID_IUNKNOWN {
         *ppvObject = this;
         rpa_add_ref(this);
-        crate::dbg_log("rpa_query_interface -> S_OK");
+        crate::dbg_log("rpa_query_interface -> S_OK (IInArchive)");
+        S_OK
+    } else if *riid == IID_IOUTARCHIVE {
+        *ppvObject = (this as *mut u8).add(std::mem::size_of::<usize>()) as *mut c_void;
+        rpa_add_ref(this);
+        crate::dbg_log("rpa_query_interface -> S_OK (IOutArchive)");
         S_OK
     } else {
         crate::dbg_log(&format!("rpa_query_interface -> E_NOINTERFACE for {:?}", *riid));
@@ -89,16 +109,16 @@ unsafe extern "system" fn rpa_query_interface(
 }
 
 unsafe extern "system" fn rpa_add_ref(this: *mut c_void) -> u32 {
-    let arc = &*(this as *mut RpaInArchive);
+    let arc = &*(this as *mut RpaHandler);
     arc.ref_count.fetch_add(1, Ordering::SeqCst) + 1
 }
 
 unsafe extern "system" fn rpa_release(this: *mut c_void) -> u32 {
-    let arc = &*(this as *mut RpaInArchive);
+    let arc = &*(this as *mut RpaHandler);
     let prev = arc.ref_count.fetch_sub(1, Ordering::SeqCst);
     if prev == 1 {
         // Drop the object
-        let boxed = Box::from_raw(this as *mut RpaInArchive);
+        let boxed = Box::from_raw(this as *mut RpaHandler);
         if let Ok(mut guard) = boxed.state.lock() {
             if let Some(state) = guard.take() {
                 if !state.stream.is_null() {
@@ -110,6 +130,33 @@ unsafe extern "system" fn rpa_release(this: *mut c_void) -> u32 {
     } else {
         prev - 1
     }
+}
+
+// -------------------------------------------------------------------------
+// IOutArchive interface forwarding
+// -------------------------------------------------------------------------
+#[inline]
+unsafe fn get_handler_from_out(this: *mut c_void) -> *mut RpaHandler {
+    (this as *mut u8).sub(std::mem::size_of::<usize>()) as *mut RpaHandler
+}
+
+unsafe extern "system" fn rpa_out_query_interface(
+    this: *mut c_void,
+    riid: *const GUID,
+    ppvObject: *mut *mut c_void,
+) -> HRESULT {
+    let handler = get_handler_from_out(this);
+    rpa_query_interface(handler as *mut c_void, riid, ppvObject)
+}
+
+unsafe extern "system" fn rpa_out_add_ref(this: *mut c_void) -> u32 {
+    let handler = get_handler_from_out(this);
+    rpa_add_ref(handler as *mut c_void)
+}
+
+unsafe extern "system" fn rpa_out_release(this: *mut c_void) -> u32 {
+    let handler = get_handler_from_out(this);
+    rpa_release(handler as *mut c_void)
 }
 
 unsafe extern "system" fn rpa_open(
@@ -517,8 +564,8 @@ unsafe extern "system" fn rpa_get_archive_property(
             Err(_) => return E_FAIL,
         };
         match &*guard {
-            Some(state) => (true, Some(state.archive.index_offset), Some(state.phy_size)),
-            None => (true, None, None),
+            Some(state) => (false, Some(state.archive.index_offset), Some(state.phy_size)),
+            None => (false, None, None),
         }
     };
 
@@ -585,4 +632,327 @@ unsafe extern "system" fn rpa_get_archive_property_info(
     _varType: *mut VARTYPE,
 ) -> HRESULT {
     S_OK
+}
+
+// =========================================================================
+// IOutArchive Implementation
+// =========================================================================
+
+unsafe extern "system" fn rpa_get_file_time_type(
+    _this: *mut c_void,
+    type_: *mut u32,
+) -> HRESULT {
+    if !type_.is_null() {
+        *type_ = 0; // NFileTimeType::kWindows
+        S_OK
+    } else {
+        E_INVALIDARG
+    }
+}
+
+enum UpdateSource {
+    Stream(*mut ISequentialInStream),
+    Existing(Arc<RpaArchive>, *mut IInStream, usize),
+}
+
+struct UpdateItem {
+    #[allow(dead_code)]
+    client_index: u32,
+    path: String,
+    size_hint: Option<u64>,
+    source: UpdateSource,
+}
+
+impl RpaItemSource for UpdateItem {
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn size_hint(&self) -> Option<u64> {
+        self.size_hint
+    }
+
+    fn write_to<W: Write>(&mut self, writer: &mut W) -> std::io::Result<u64> {
+        match &self.source {
+            UpdateSource::Stream(in_stream) => {
+                let mut reader = unsafe { SequentialInStreamReader::new(*in_stream) };
+                std::io::copy(&mut reader, writer)
+            }
+            UpdateSource::Existing(archive, stream, idx) => {
+                let entry = &archive.entries[*idx];
+                let mut reader = unsafe { StreamReader::new(*stream) };
+                reader.seek(SeekFrom::Start(entry.offset()))?;
+
+                let mut total_written = 0u64;
+                if !entry.prefix().is_empty() {
+                    writer.write_all(entry.prefix())?;
+                    total_written += entry.prefix().len() as u64;
+                }
+
+                let remaining = entry.length().saturating_sub(entry.prefix().len() as u64);
+                let mut taken = (&mut reader).take(remaining);
+                let copied = std::io::copy(&mut taken, writer)?;
+                total_written += copied;
+                Ok(total_written)
+            }
+        }
+    }
+}
+
+unsafe fn cleanup_update_items(items: &mut [UpdateItem], seek_opt: Option<*mut IOutStream>) {
+    for item in items.iter_mut() {
+        if let UpdateSource::Stream(ptr) = item.source {
+            if !ptr.is_null() {
+                ((*(*ptr).vtable).Release)(ptr as *mut c_void);
+            }
+        }
+    }
+    if let Some(s) = seek_opt {
+        ((*(*s).vtable).Release)(s as *mut c_void);
+    }
+}
+
+unsafe extern "system" fn rpa_update_items(
+    this: *mut c_void,
+    outStream: *mut ISequentialOutStream,
+    numItems: u32,
+    updateCallback: *mut IArchiveUpdateCallback,
+) -> HRESULT {
+    crate::dbg_log(&format!("rpa_update_items: numItems={}", numItems));
+    if outStream.is_null() || updateCallback.is_null() {
+        return E_INVALIDARG;
+    }
+
+    let handler = get_handler_from_out(this);
+
+    // 1. Inspect existing state if open
+    let (existing_archive, existing_stream, target_version, target_key) = {
+        let guard = match (*handler).state.lock() {
+            Ok(g) => g,
+            Err(_) => return E_FAIL,
+        };
+        if let Some(state) = &*guard {
+            (
+                Some(Arc::clone(&state.archive)),
+                Some(state.stream),
+                state.archive.version,
+                state.archive.key,
+            )
+        } else {
+            (None, None, RpaVersion::Rpa3, 0u32)
+        }
+    };
+
+    // 2. Query IOutStream on outStream to check if seeking is supported
+    let mut out_seek: *mut IOutStream = std::ptr::null_mut();
+    let hr_seek = ((*(*outStream).vtable).QueryInterface)(
+        outStream as *mut c_void,
+        &IID_IOUTSTREAM,
+        &mut out_seek as *mut *mut IOutStream as *mut *mut c_void,
+    );
+    let seek_opt = if hr_seek == S_OK && !out_seek.is_null() {
+        Some(out_seek)
+    } else {
+        None
+    };
+
+    let mut update_items = Vec::with_capacity(numItems as usize);
+    let mut total_unpack_size = 0u64;
+
+    // 3. Collect update items
+    for i in 0..numItems {
+        let mut new_data: i32 = 0;
+        let mut new_props: i32 = 0;
+        let mut index_in_arc: u32 = u32::MAX;
+
+        let hr = ((*(*updateCallback).vtable).GetUpdateItemInfo)(
+            updateCallback as *mut c_void,
+            i,
+            &mut new_data,
+            &mut new_props,
+            &mut index_in_arc,
+        );
+        if hr != S_OK {
+            cleanup_update_items(&mut update_items, seek_opt);
+            return hr;
+        }
+
+        // Check if directory
+        let mut is_dir = false;
+        if new_props != 0 {
+            let mut var = PROPVARIANT::new();
+            let hr = ((*(*updateCallback).vtable).GetProperty)(
+                updateCallback as *mut c_void,
+                i,
+                KPID_IS_DIR,
+                &mut var,
+            );
+            if hr == S_OK && var.vt == VT_BOOL {
+                is_dir = unsafe { var.data.boolVal != 0 };
+            }
+            var.clear();
+        }
+        if is_dir {
+            continue;
+        }
+
+        // Path
+        let path = if new_props != 0 {
+            let mut var = PROPVARIANT::new();
+            let hr = ((*(*updateCallback).vtable).GetProperty)(
+                updateCallback as *mut c_void,
+                i,
+                KPID_PATH,
+                &mut var,
+            );
+            let p = if hr == S_OK && var.vt == VT_BSTR {
+                var.get_str().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            var.clear();
+            normalize_rpa_path(&p)
+        } else if let Some(ref arc) = existing_archive {
+            if (index_in_arc as usize) < arc.len() {
+                normalize_rpa_path(&arc.entries[index_in_arc as usize].path)
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        };
+
+        if path.is_empty() {
+            continue;
+        }
+
+        // Size hint for progress bar
+        let mut size_hint: Option<u64> = None;
+        if new_props != 0 {
+            let mut var = PROPVARIANT::new();
+            let hr = ((*(*updateCallback).vtable).GetProperty)(
+                updateCallback as *mut c_void,
+                i,
+                KPID_SIZE,
+                &mut var,
+            );
+            if hr == S_OK && var.vt == VT_UI8 {
+                let sz = unsafe { var.data.uhVal };
+                size_hint = Some(sz);
+                total_unpack_size += sz;
+            }
+            var.clear();
+        } else if let Some(ref arc) = existing_archive {
+            if (index_in_arc as usize) < arc.len() {
+                let sz = arc.entries[index_in_arc as usize].length();
+                size_hint = Some(sz);
+                total_unpack_size += sz;
+            }
+        }
+
+        if new_data != 0 {
+            let mut in_stream: *mut ISequentialInStream = std::ptr::null_mut();
+            let hr = ((*(*updateCallback).vtable).GetStream)(
+                updateCallback as *mut c_void,
+                i,
+                &mut in_stream,
+            );
+            if hr == S_FALSE || in_stream.is_null() {
+                continue;
+            } else if hr != S_OK {
+                cleanup_update_items(&mut update_items, seek_opt);
+                return hr;
+            }
+
+            update_items.push(UpdateItem {
+                client_index: i,
+                path,
+                size_hint,
+                source: UpdateSource::Stream(in_stream),
+            });
+        } else if let (Some(arc), Some(stream)) = (&existing_archive, existing_stream) {
+            if (index_in_arc as usize) < arc.len() {
+                update_items.push(UpdateItem {
+                    client_index: i,
+                    path,
+                    size_hint,
+                    source: UpdateSource::Existing(Arc::clone(arc), stream, index_in_arc as usize),
+                });
+            }
+        }
+    }
+
+    // 4. Report total size to progress bar
+    let _ = ((*(*updateCallback).vtable).SetTotal)(updateCallback as *mut c_void, total_unpack_size);
+
+    let mut completed_bytes = 0u64;
+    let on_progress = |bytes: u64| {
+        completed_bytes += bytes;
+        let _ = ((*(*updateCallback).vtable).SetCompleted)(
+            updateCallback as *mut c_void,
+            &completed_bytes,
+        );
+    };
+
+    // 5. Perform archive writing
+    let write_res = if let Some(s) = seek_opt {
+        let mut stream_writer = StreamWriter::new(outStream, Some(s));
+        RpaWriter::write_archive(
+            &mut stream_writer,
+            &mut update_items,
+            target_version,
+            target_key,
+            on_progress,
+        )
+    } else {
+        // Fallback for non-seekable streams: buffer to tempfile
+        match tempfile::tempfile() {
+            Ok(mut temp) => {
+                let res = RpaWriter::write_archive(
+                    &mut temp,
+                    &mut update_items,
+                    target_version,
+                    target_key,
+                    on_progress,
+                );
+                if res.is_ok() {
+                    let _ = temp.seek(SeekFrom::Start(0));
+                    let mut seq_writer = StreamWriter::new(outStream, None);
+                    let _ = std::io::copy(&mut temp, &mut seq_writer);
+                }
+                res
+            }
+            Err(e) => Err(RpaError::Io(e)),
+        }
+    };
+
+    // 6. Report results for each item and clean up resources
+    for item in update_items.iter_mut() {
+        if write_res.is_ok() {
+            let _ = ((*(*updateCallback).vtable).SetOperationResult)(
+                updateCallback as *mut c_void,
+                0, // kOK
+            );
+        }
+        if let UpdateSource::Stream(ptr) = item.source {
+            if !ptr.is_null() {
+                ((*(*ptr).vtable).Release)(ptr as *mut c_void);
+            }
+        }
+    }
+
+    if let Some(s) = seek_opt {
+        ((*(*s).vtable).Release)(s as *mut c_void);
+    }
+
+    match write_res {
+        Ok(_) => {
+            crate::dbg_log("rpa_update_items completed successfully with S_OK");
+            S_OK
+        }
+        Err(e) => {
+            crate::dbg_log(&format!("rpa_update_items failed: {}", e));
+            E_FAIL
+        }
+    }
 }

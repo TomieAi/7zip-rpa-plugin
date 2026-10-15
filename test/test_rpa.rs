@@ -163,3 +163,72 @@ fn test_synthetic_rpa3_with_obfuscation_and_prefix() {
     expected_f2.extend_from_slice(file2_body);
     assert_eq!(f2_read, expected_f2);
 }
+
+#[test]
+fn test_rpa_writer_rpa2_roundtrip() {
+    use rpa::rpa::writer::{BytesSource, RpaWriter};
+
+    let mut items = vec![
+        BytesSource::new("hello.txt", b"Hello World from RPA-2!".to_vec()),
+        BytesSource::new("sub/dir/test.dat", vec![0x12, 0x34, 0x56, 0x78, 0x9A]),
+        BytesSource::new("scripts/main.rpy", b"label start:\n    return\n".to_vec()),
+    ];
+
+    let mut cursor = Cursor::new(Vec::new());
+    RpaWriter::write_archive(&mut cursor, &mut items, RpaVersion::Rpa2, 0, |_| {})
+        .expect("Write RPA-2");
+
+    let archive = RpaParser::parse(&mut cursor).expect("Parse written RPA-2");
+    assert_eq!(archive.version, RpaVersion::Rpa2);
+    assert_eq!(archive.len(), 3);
+
+    let h = archive.find_by_path("hello.txt").unwrap();
+    assert_eq!(
+        RpaReader::read_entry(&mut cursor, h).unwrap(),
+        b"Hello World from RPA-2!"
+    );
+
+    let d = archive.find_by_path("sub/dir/test.dat").unwrap();
+    assert_eq!(
+        RpaReader::read_entry(&mut cursor, d).unwrap(),
+        vec![0x12, 0x34, 0x56, 0x78, 0x9A]
+    );
+
+    let s = archive.find_by_path("scripts/main.rpy").unwrap();
+    assert_eq!(
+        RpaReader::read_entry(&mut cursor, s).unwrap(),
+        b"label start:\n    return\n"
+    );
+}
+
+#[test]
+fn test_rpa_writer_rpa3_roundtrip() {
+    use rpa::rpa::writer::{BytesSource, RpaWriter};
+
+    let key: u32 = 0x1337CAFE;
+    let mut items = vec![
+        BytesSource::new("gui/window_icon.png", vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+        BytesSource::new("story/chapter1.rpyc", vec![0xAA; 1024]),
+    ];
+
+    let mut cursor = Cursor::new(Vec::new());
+    RpaWriter::write_archive(&mut cursor, &mut items, RpaVersion::Rpa3, key, |_| {})
+        .expect("Write RPA-3");
+
+    let archive = RpaParser::parse(&mut cursor).expect("Parse written RPA-3");
+    assert_eq!(archive.version, RpaVersion::Rpa3);
+    assert_eq!(archive.key, key);
+    assert_eq!(archive.len(), 2);
+
+    let icon = archive.find_by_path("gui/window_icon.png").unwrap();
+    assert_eq!(
+        RpaReader::read_entry(&mut cursor, icon).unwrap(),
+        vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    );
+
+    let story = archive.find_by_path("story/chapter1.rpyc").unwrap();
+    assert_eq!(
+        RpaReader::read_entry(&mut cursor, story).unwrap(),
+        vec![0xAA; 1024]
+    );
+}

@@ -6,7 +6,7 @@ pub mod rpa;
 use std::ffi::c_void;
 
 use crate::archive::RpaInArchive;
-use crate::com::guid::{GUID, IID_IINARCHIVE, IID_IUNKNOWN, RPA_HANDLER_GUID};
+use crate::com::guid::{GUID, IID_IINARCHIVE, IID_IOUTARCHIVE, IID_IUNKNOWN, RPA_HANDLER_GUID};
 use crate::com::propvariant::{
     CLASS_E_CLASSNOTAVAILABLE, E_FAIL, E_INVALIDARG, HRESULT, PROPVARIANT, S_OK,
 };
@@ -29,7 +29,7 @@ pub fn dbg_log(_s: &str) {
 
 /// Create an instance of the archive handler COM object.
 ///
-/// Called by 7-Zip when opening an archive.
+/// Called by 7-Zip when opening or creating an archive.
 #[no_mangle]
 pub unsafe extern "system" fn CreateObject(
     clsid: *const GUID,
@@ -42,15 +42,22 @@ pub unsafe extern "system" fn CreateObject(
     }
     *out_object = std::ptr::null_mut();
 
-    if *clsid == RPA_HANDLER_GUID && (*iid == IID_IINARCHIVE || *iid == IID_IUNKNOWN) {
-        let instance = RpaInArchive::new();
-        *out_object = instance as *mut c_void;
-        dbg_log("CreateObject -> S_OK");
-        S_OK
-    } else {
-        dbg_log("CreateObject -> CLASS_E_CLASSNOTAVAILABLE");
-        CLASS_E_CLASSNOTAVAILABLE
+    if *clsid == RPA_HANDLER_GUID {
+        if *iid == IID_IINARCHIVE || *iid == IID_IUNKNOWN {
+            let instance = RpaInArchive::new();
+            *out_object = instance as *mut c_void;
+            dbg_log("CreateObject -> S_OK (IInArchive)");
+            return S_OK;
+        } else if *iid == IID_IOUTARCHIVE {
+            let instance = RpaInArchive::new();
+            *out_object = (instance as *mut u8).add(std::mem::size_of::<usize>()) as *mut c_void;
+            dbg_log("CreateObject -> S_OK (IOutArchive)");
+            return S_OK;
+        }
     }
+
+    dbg_log("CreateObject -> CLASS_E_CLASSNOTAVAILABLE");
+    CLASS_E_CLASSNOTAVAILABLE
 }
 
 /// Retrieve format property for format 0.
@@ -86,7 +93,7 @@ pub unsafe extern "system" fn GetHandlerProperty2(
         handler_prop::K_FLAGS => {
             val.set_u32(arc_info_flags::K_KEEP_NAME | arc_info_flags::K_FIND_SIGNATURE)
         }
-        handler_prop::K_UPDATE => val.set_bool(false),
+        handler_prop::K_UPDATE => val.set_bool(true),
         handler_prop::K_SIGNATURE => val.set_binary(b"RPA-"),
         handler_prop::K_SIGNATURE_OFFSET => val.set_u32(0),
         handler_prop::K_TIME_FLAGS => S_OK,

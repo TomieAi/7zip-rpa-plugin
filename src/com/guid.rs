@@ -54,9 +54,12 @@ pub const fn make_7zip_guid(group_id: u8, sub_id: u8) -> GUID {
 pub const IID_ISEQUENTIALINSTREAM: GUID = make_7zip_guid(3, 0x01);
 pub const IID_ISEQUENTIALOUTSTREAM: GUID = make_7zip_guid(3, 0x02);
 pub const IID_IINSTREAM: GUID = make_7zip_guid(3, 0x03);
+pub const IID_IOUTSTREAM: GUID = make_7zip_guid(3, 0x04);
 pub const IID_IARCHIVEOPENCALLBACK: GUID = make_7zip_guid(6, 0x10);
 pub const IID_IARCHIVEEXTRACTCALLBACK: GUID = make_7zip_guid(6, 0x20);
 pub const IID_IINARCHIVE: GUID = make_7zip_guid(6, 0x60);
+pub const IID_IARCHIVEUPDATECALLBACK: GUID = make_7zip_guid(6, 0x80);
+pub const IID_IOUTARCHIVE: GUID = make_7zip_guid(6, 0xA0);
 
 // Unique GUID for Ren'Py RPA format handler:
 // {9f1a7b42-5c8e-47e1-bf2a-3d8e4f12996a}

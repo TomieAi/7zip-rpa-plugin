@@ -39,6 +39,11 @@ pub struct ISequentialInStreamVTable {
     ) -> HRESULT,
 }
 
+#[repr(C)]
+pub struct ISequentialInStream {
+    pub vtable: *const ISequentialInStreamVTable,
+}
+
 // =========================================================================
 // ISequentialOutStream
 // =========================================================================
@@ -93,6 +98,38 @@ pub struct IInStreamVTable {
 #[repr(C)]
 pub struct IInStream {
     pub vtable: *const IInStreamVTable,
+}
+
+// =========================================================================
+// IOutStream
+// =========================================================================
+#[repr(C)]
+pub struct IOutStreamVTable {
+    pub QueryInterface: unsafe extern "system" fn(
+        this: *mut c_void,
+        riid: *const GUID,
+        ppvObject: *mut *mut c_void,
+    ) -> HRESULT,
+    pub AddRef: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    pub Release: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    pub Write: unsafe extern "system" fn(
+        this: *mut c_void,
+        data: *const c_void,
+        size: u32,
+        processedSize: *mut u32,
+    ) -> HRESULT,
+    pub Seek: unsafe extern "system" fn(
+        this: *mut c_void,
+        offset: i64,
+        seekOrigin: u32,
+        newPosition: *mut u64,
+    ) -> HRESULT,
+    pub SetSize: unsafe extern "system" fn(this: *mut c_void, newSize: u64) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct IOutStream {
+    pub vtable: *const IOutStreamVTable,
 }
 
 // =========================================================================
@@ -220,4 +257,81 @@ pub struct IInArchiveVTable {
 #[repr(C)]
 pub struct IInArchive {
     pub vtable: *const IInArchiveVTable,
+}
+
+// =========================================================================
+// IArchiveUpdateCallback
+// =========================================================================
+#[repr(C)]
+pub struct IArchiveUpdateCallbackVTable {
+    // IUnknown
+    pub QueryInterface: unsafe extern "system" fn(
+        this: *mut c_void,
+        riid: *const GUID,
+        ppvObject: *mut *mut c_void,
+    ) -> HRESULT,
+    pub AddRef: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    pub Release: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    // IProgress
+    pub SetTotal: unsafe extern "system" fn(this: *mut c_void, total: u64) -> HRESULT,
+    pub SetCompleted: unsafe extern "system" fn(this: *mut c_void, completeValue: *const u64) -> HRESULT,
+    // IArchiveUpdateCallback
+    pub GetUpdateItemInfo: unsafe extern "system" fn(
+        this: *mut c_void,
+        index: u32,
+        newData: *mut i32,
+        newProps: *mut i32,
+        indexInArchive: *mut u32,
+    ) -> HRESULT,
+    pub GetProperty: unsafe extern "system" fn(
+        this: *mut c_void,
+        index: u32,
+        propID: PROPID,
+        value: *mut PROPVARIANT,
+    ) -> HRESULT,
+    pub GetStream: unsafe extern "system" fn(
+        this: *mut c_void,
+        index: u32,
+        inStream: *mut *mut ISequentialInStream,
+    ) -> HRESULT,
+    pub SetOperationResult: unsafe extern "system" fn(
+        this: *mut c_void,
+        operationResult: i32,
+    ) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct IArchiveUpdateCallback {
+    pub vtable: *const IArchiveUpdateCallbackVTable,
+}
+
+// =========================================================================
+// IOutArchive
+// =========================================================================
+#[repr(C)]
+pub struct IOutArchiveVTable {
+    // IUnknown
+    pub QueryInterface: unsafe extern "system" fn(
+        this: *mut c_void,
+        riid: *const GUID,
+        ppvObject: *mut *mut c_void,
+    ) -> HRESULT,
+    pub AddRef: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    pub Release: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    // IOutArchive
+    pub UpdateItems: unsafe extern "system" fn(
+        this: *mut c_void,
+        outStream: *mut ISequentialOutStream,
+        numItems: u32,
+        updateCallback: *mut IArchiveUpdateCallback,
+    ) -> HRESULT,
+    pub GetFileTimeType: unsafe extern "system" fn(
+        this: *mut c_void,
+        type_: *mut u32,
+    ) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct IOutArchive {
+    pub vtable: *const IOutArchiveVTable,
 }
