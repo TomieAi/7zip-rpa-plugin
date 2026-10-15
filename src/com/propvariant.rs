@@ -101,6 +101,22 @@ impl PROPVARIANT {
         }
     }
 
+    pub fn get_bool(&self) -> Option<bool> {
+        if self.vt == VT_BOOL {
+            Some(unsafe { self.data.boolVal != 0 })
+        } else {
+            None
+        }
+    }
+
+    pub fn get_u64(&self) -> Option<u64> {
+        if self.vt == VT_UI8 {
+            Some(unsafe { self.data.uhVal })
+        } else {
+            None
+        }
+    }
+
     pub fn clear(&mut self) {
         unsafe {
             VariantClear(self);
@@ -173,11 +189,18 @@ impl PROPVARIANT {
     }
 }
 
+impl Default for PROPVARIANT {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn alloc_bstr(s: &str) -> *mut u16 {
     let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe { SysAllocStringLen(wide.as_ptr(), (wide.len() - 1) as u32) }
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn free_bstr(bstr: *mut u16) {
     if !bstr.is_null() {
         unsafe { SysFreeString(bstr) };

@@ -11,8 +11,7 @@ use crate::com::interfaces::{
     IInStream, IOutArchiveVTable, IOutStream, ISequentialInStream, ISequentialOutStream,
 };
 use crate::com::propvariant::{
-    E_FAIL, E_INVALIDARG, E_NOINTERFACE, HRESULT, PROPVARIANT, S_FALSE, S_OK, VARTYPE, VT_BOOL,
-    VT_BSTR, VT_UI8,
+    E_FAIL, E_INVALIDARG, E_NOINTERFACE, HRESULT, PROPVARIANT, S_FALSE, S_OK, VARTYPE,
 };
 use crate::com::stream::{SequentialInStreamReader, StreamReader, StreamWriter};
 use crate::models::archive::RpaArchive;
@@ -333,10 +332,10 @@ impl Write for OutStreamWriter {
         if hr == S_OK {
             Ok(processed as usize)
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("ISequentialOutStream::Write failed (HRESULT 0x{:08X})", hr),
-            ))
+            Err(std::io::Error::other(format!(
+                "ISequentialOutStream::Write failed (HRESULT 0x{:08X})",
+                hr
+            )))
         }
     }
 
@@ -787,8 +786,10 @@ unsafe extern "system" fn rpa_update_items(
                 KPID_IS_DIR,
                 &mut var,
             );
-            if hr == S_OK && var.vt == VT_BOOL {
-                is_dir = unsafe { var.data.boolVal != 0 };
+            if hr == S_OK {
+                if let Some(b) = var.get_bool() {
+                    is_dir = b;
+                }
             }
             var.clear();
         }
@@ -805,7 +806,7 @@ unsafe extern "system" fn rpa_update_items(
                 KPID_PATH,
                 &mut var,
             );
-            let p = if hr == S_OK && var.vt == VT_BSTR {
+            let p = if hr == S_OK {
                 var.get_str().unwrap_or_default()
             } else {
                 String::new()
@@ -836,10 +837,11 @@ unsafe extern "system" fn rpa_update_items(
                 KPID_SIZE,
                 &mut var,
             );
-            if hr == S_OK && var.vt == VT_UI8 {
-                let sz = unsafe { var.data.uhVal };
-                size_hint = Some(sz);
-                total_unpack_size += sz;
+            if hr == S_OK {
+                if let Some(sz) = var.get_u64() {
+                    size_hint = Some(sz);
+                    total_unpack_size += sz;
+                }
             }
             var.clear();
         } else if let Some(ref arc) = existing_archive {

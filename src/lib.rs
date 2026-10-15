@@ -30,6 +30,9 @@ pub fn dbg_log(_s: &str) {
 /// Create an instance of the archive handler COM object.
 ///
 /// Called by 7-Zip when opening or creating an archive.
+///
+/// # Safety
+/// The caller must ensure that `clsid`, `iid`, and `out_object` are valid pointers.
 #[no_mangle]
 pub unsafe extern "system" fn CreateObject(
     clsid: *const GUID,
@@ -61,6 +64,9 @@ pub unsafe extern "system" fn CreateObject(
 }
 
 /// Retrieve format property for format 0.
+///
+/// # Safety
+/// The caller must ensure `value` is a valid pointer to a PROPVARIANT.
 #[no_mangle]
 pub unsafe extern "system" fn GetHandlerProperty(
     prop_id: PROPID,
@@ -70,6 +76,9 @@ pub unsafe extern "system" fn GetHandlerProperty(
 }
 
 /// Retrieve format properties for format index.
+///
+/// # Safety
+/// The caller must ensure `value` is a valid pointer to a PROPVARIANT.
 #[no_mangle]
 pub unsafe extern "system" fn GetHandlerProperty2(
     format_index: u32,
@@ -103,6 +112,9 @@ pub unsafe extern "system" fn GetHandlerProperty2(
 }
 
 /// Returns the number of archive formats supported by this plugin (1: Ren'Py RPA).
+///
+/// # Safety
+/// The caller must ensure `num_formats` is a valid pointer.
 #[no_mangle]
 pub unsafe extern "system" fn GetNumberOfFormats(num_formats: *mut u32) -> HRESULT {
     if !num_formats.is_null() {

@@ -41,10 +41,10 @@ impl Read for StreamReader {
         if hr == S_OK {
             Ok(processed as usize)
         } else {
-            Err(Error::new(
-                ErrorKind::Other,
-                format!("IInStream::Read failed with HRESULT 0x{:08X}", hr),
-            ))
+            Err(Error::other(format!(
+                "IInStream::Read failed with HRESULT 0x{:08X}",
+                hr
+            )))
         }
     }
 }
@@ -74,10 +74,10 @@ impl Seek for StreamReader {
         if hr == S_OK {
             Ok(new_position)
         } else {
-            Err(Error::new(
-                ErrorKind::Other,
-                format!("IInStream::Seek failed with HRESULT 0x{:08X}", hr),
-            ))
+            Err(Error::other(format!(
+                "IInStream::Seek failed with HRESULT 0x{:08X}",
+                hr
+            )))
         }
     }
 }
@@ -88,6 +88,9 @@ pub struct SequentialInStreamReader {
 
 impl SequentialInStreamReader {
     /// Create a new SequentialInStreamReader wrapper around an ISequentialInStream pointer.
+    ///
+    /// # Safety
+    /// The caller must ensure `stream` is non-null and valid for the lifetime of this reader.
     pub unsafe fn new(stream: *mut ISequentialInStream) -> Self {
         Self { stream }
     }
@@ -112,10 +115,10 @@ impl Read for SequentialInStreamReader {
         if hr == S_OK {
             Ok(processed as usize)
         } else {
-            Err(Error::new(
-                ErrorKind::Other,
-                format!("ISequentialInStream::Read failed with HRESULT 0x{:08X}", hr),
-            ))
+            Err(Error::other(format!(
+                "ISequentialInStream::Read failed with HRESULT 0x{:08X}",
+                hr
+            )))
         }
     }
 }
@@ -127,6 +130,10 @@ pub struct StreamWriter {
 }
 
 impl StreamWriter {
+    /// Create a new StreamWriter wrapper around output streams.
+    ///
+    /// # Safety
+    /// The caller must ensure `seq_stream` (and optional `seek_stream`) are non-null and valid.
     pub unsafe fn new(
         seq_stream: *mut ISequentialOutStream,
         seek_stream: Option<*mut IOutStream>,
@@ -167,10 +174,10 @@ impl Write for StreamWriter {
             self.pos += processed as u64;
             Ok(processed as usize)
         } else {
-            Err(Error::new(
-                ErrorKind::Other,
-                format!("ISequentialOutStream::Write failed with HRESULT 0x{:08X}", hr),
-            ))
+            Err(Error::other(format!(
+                "ISequentialOutStream::Write failed with HRESULT 0x{:08X}",
+                hr
+            )))
         }
     }
 
@@ -202,10 +209,10 @@ impl Seek for StreamWriter {
                 self.pos = new_pos;
                 Ok(new_pos)
             } else {
-                Err(Error::new(
-                    ErrorKind::Other,
-                    format!("IOutStream::Seek failed with HRESULT 0x{:08X}", hr),
-                ))
+                Err(Error::other(format!(
+                    "IOutStream::Seek failed with HRESULT 0x{:08X}",
+                    hr
+                )))
             }
         } else {
             Err(Error::new(
