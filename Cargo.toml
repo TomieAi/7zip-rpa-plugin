@@ -1,0 +1,33 @@
+[package]
+name = "rpa7z"
+version = "0.1.0"
+edition = "2021"
+description = "7-Zip plugin for Ren'Py RPA archive format (.rpa, .rpi)"
+
+[lib]
+name = "rpa"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+flate2 = "1.0"
+num-traits = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde-pickle = "1.2"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[[test]]
+name = "test_rpa"
+path = "test/test_rpa.rs"
+
+[[test]]
+name = "test_com"
+path = "test/test_com.rs"
+
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
